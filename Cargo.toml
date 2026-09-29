@@ -1,0 +1,13 @@
+[package]
+name = "armada-boot"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+uefi = { version = "0.41", features = ["alloc", "global_allocator", "logger", "panic_handler"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
