@@ -1,0 +1,289 @@
+use alloc::vec;
+use alloc::vec::Vec;
+use core::convert::Infallible;
+use core::fmt::Write;
+use core::time::Duration;
+use embedded_graphics::draw_target::DrawTarget;
+use embedded_graphics::geometry::{OriginDimensions, Point, Size};
+use embedded_graphics::image::Image;
+use embedded_graphics::pixelcolor::{Rgb888, RgbColor};
+use embedded_graphics::primitives::{Primitive, PrimitiveStyle, Rectangle, RoundedRectangle};
+use embedded_graphics::{Drawable, Pixel};
+use fdt::Fdt;
+use tinybmp::Bmp;
+use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
+use u8g2_fonts::{FontRenderer, fonts};
+use uefi::boot::{self, OpenProtocolAttributes, OpenProtocolParams, image_handle};
+use uefi::proto::ProtocolPointer;
+use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
+use uefi::proto::console::text::{Color, Key, ScanCode};
+use uefi::{Handle, Result, guid, system};
+
+const LOGO: &[u8] = include_bytes!("../assets/armada.bmp");
+const DEVICE_TREE: uefi::Guid = guid!("b1b621d5-f19c-41a5-830b-d9152c69aae0");
+
+const WHITE: Rgb888 = Rgb888::WHITE;
+const MUTED: Rgb888 = Rgb888::new(0x9a, 0x9a, 0xa0);
+const SELECTED: Rgb888 = Rgb888::new(0x28, 0x28, 0x2d);
+
+#[derive(Clone, Copy)]
+pub enum Choice {
+    Armada,
+    Advanced,
+}
+
+struct Canvas {
+    pixels: Vec<BltPixel>,
+    width: usize,
+    height: usize,
+    turns: u8,
+}
+
+impl Canvas {
+    fn new(width: usize, height: usize, turns: u8) -> Self {
+        Self {
+            pixels: vec![BltPixel::new(0, 0, 0); width * height],
+            width,
+            height,
+            turns: turns % 4,
+        }
+    }
+
+    fn show(&self, output: &mut GraphicsOutput) -> Result {
+        output.blt(BltOp::BufferToVideo {
+            buffer: &self.pixels,
+            src: BltRegion::Full,
+            dest: (0, 0),
+            dims: (self.width, self.height),
+        })
+    }
+}
+
+impl OriginDimensions for Canvas {
+    fn size(&self) -> Size {
+        let size = Size::new(self.width as u32, self.height as u32);
+        if self.turns % 2 == 1 {
+            Size::new(size.height, size.width)
+        } else {
+            size
+        }
+    }
+}
+
+impl DrawTarget for Canvas {
+    type Color = Rgb888;
+    type Error = Infallible;
+
+    fn draw_iter<I>(&mut self, pixels: I) -> core::result::Result<(), Self::Error>
+    where
+        I: IntoIterator<Item = Pixel<Self::Color>>,
+    {
+        let size = self.size();
+        for Pixel(point, color) in pixels {
+            let (Ok(x), Ok(y)) = (usize::try_from(point.x), usize::try_from(point.y)) else {
+                continue;
+            };
+            if x >= size.width as usize || y >= size.height as usize {
+                continue;
+            }
+            let (x, y) = match self.turns {
+                1 => (self.width - 1 - y, x),
+                2 => (self.width - 1 - x, self.height - 1 - y),
+                3 => (y, self.height - 1 - x),
+                _ => (x, y),
+            };
+            self.pixels[y * self.width + x] = BltPixel::new(color.r(), color.g(), color.b());
+        }
+        Ok(())
+    }
+}
+
+fn open<P: ProtocolPointer + ?Sized>(handle: Handle) -> Result<boot::ScopedProtocol<P>> {
+    unsafe {
+        boot::open_protocol::<P>(
+            OpenProtocolParams {
+                handle,
+                agent: image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+}
+
+fn rotation(width: usize, height: usize) -> u8 {
+    device_tree_rotation().unwrap_or_else(|| u8::from(height > width))
+}
+
+fn device_tree_rotation() -> Option<u8> {
+    system::with_config_table(|tables| {
+        let table = tables.iter().find(|table| table.guid == DEVICE_TREE)?;
+        let tree = unsafe { Fdt::from_ptr(table.address.cast()) }.ok()?;
+        let degrees = tree
+            .all_nodes()
+            .filter(|node| node.name.split('@').next() == Some("panel"))
+            .find_map(|node| node.property("rotation")?.as_usize())?;
+        match degrees {
+            0 => Some(0),
+            90 => Some(1),
+            180 => Some(2),
+            270 => Some(3),
+            _ => None,
+        }
+    })
+}
+
+fn draw_graphics(selected: usize) -> Option<()> {
+    let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
+    let mut output = open::<GraphicsOutput>(handle).ok()?;
+    let (width, height) = output.current_mode_info().resolution();
+    let mut canvas = Canvas::new(width, height, rotation(width, height));
+    let size = canvas.size();
+    let center = size.width as i32 / 2;
+
+    system::with_stdout(|stdout| {
+        let _ = stdout.enable_cursor(false);
+    });
+
+    let logo = Bmp::<Rgb888>::from_slice(LOGO).ok()?;
+    let logo_x = center - logo.size().width as i32 / 2;
+    let logo_y = size.height as i32 / 9;
+    Image::new(&logo, Point::new(logo_x, logo_y))
+        .draw(&mut canvas)
+        .ok()?;
+
+    let title = FontRenderer::new::<fonts::u8g2_font_fub42_tr>();
+    let item = FontRenderer::new::<fonts::u8g2_font_fub30_tr>();
+    let hint = FontRenderer::new::<fonts::u8g2_font_fur17_tr>();
+    let title_y = logo_y + logo.size().height as i32 + 56;
+    title
+        .render_aligned(
+            "ARMADA",
+            Point::new(center, title_y),
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(WHITE),
+            &mut canvas,
+        )
+        .ok()?;
+
+    let labels = ["ArmadaOS", "Advanced"];
+    let row_height = 76;
+    let mut y = title_y + 100;
+    let bar = Size::new((size.width * 2 / 3).min(760), row_height as u32);
+    for (index, label) in labels.iter().enumerate() {
+        let color = if index == selected { WHITE } else { MUTED };
+        if index == selected {
+            let area = Rectangle::new(Point::new(center - bar.width as i32 / 2, y), bar);
+            RoundedRectangle::with_equal_corners(area, Size::new(14, 14))
+                .into_styled(PrimitiveStyle::with_fill(SELECTED))
+                .draw(&mut canvas)
+                .ok()?;
+        }
+        item.render_aligned(
+            *label,
+            Point::new(center, y + row_height / 2),
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(color),
+            &mut canvas,
+        )
+        .ok()?;
+        y += row_height + 12;
+    }
+
+    hint.render_aligned(
+        "VOL+/VOL- or arrows - POWER or Enter to select",
+        Point::new(center, size.height as i32 - 70),
+        VerticalPosition::Center,
+        HorizontalAlignment::Center,
+        FontColor::Transparent(MUTED),
+        &mut canvas,
+    )
+    .ok()?;
+    canvas.show(&mut output).ok()
+}
+
+fn draw_text(selected: usize) {
+    system::with_stdout(|stdout| {
+        let _ = stdout.clear();
+        let _ = stdout.enable_cursor(false);
+        let _ = writeln!(stdout, "ARMADA\r\n");
+        let _ = writeln!(
+            stdout,
+            "{} ArmadaOS\r",
+            if selected == 0 { ">" } else { " " }
+        );
+        let _ = writeln!(
+            stdout,
+            "{} Advanced\r",
+            if selected == 1 { ">" } else { " " }
+        );
+        let _ = writeln!(stdout, "\r\nUse arrows and Enter to select\r");
+    });
+}
+
+fn draw(selected: usize) {
+    if draw_graphics(selected).is_none() {
+        draw_text(selected);
+    }
+}
+
+fn wait_for_release() {
+    let mut idle = 0;
+    for _ in 0..50 {
+        let pressed = system::with_stdin(|stdin| stdin.read_key().ok().flatten().is_some());
+        idle = if pressed { 0 } else { idle + 1 };
+        if idle == 3 {
+            return;
+        }
+        boot::stall(Duration::from_millis(100));
+    }
+}
+
+pub fn menu() -> Choice {
+    let mut selected = 0;
+    system::with_stdin(|stdin| {
+        let _ = stdin.reset(false);
+    });
+    draw(selected);
+
+    for _ in 0..60 {
+        let key = system::with_stdin(|stdin| stdin.read_key().ok().flatten());
+        match key {
+            Some(Key::Special(ScanCode::UP | ScanCode::DOWN)) => {
+                selected ^= 1;
+                draw(selected);
+                boot::stall(Duration::from_millis(250));
+            }
+            Some(Key::Special(ScanCode::SUSPEND)) => break,
+            Some(Key::Printable(key)) if key == '\r' => break,
+            _ => boot::stall(Duration::from_millis(50)),
+        }
+    }
+
+    wait_for_release();
+    if selected == 0 {
+        Choice::Armada
+    } else {
+        Choice::Advanced
+    }
+}
+
+pub fn clear() {
+    if let Ok(handle) = boot::get_handle_for_protocol::<GraphicsOutput>()
+        && let Ok(mut output) = open::<GraphicsOutput>(handle)
+    {
+        let size = output.current_mode_info().resolution();
+        let _ = output.blt(BltOp::VideoFill {
+            color: BltPixel::new(0, 0, 0),
+            dest: (0, 0),
+            dims: size,
+        });
+    }
+    system::with_stdout(|stdout| {
+        let _ = stdout.set_color(Color::LightGray, Color::Black);
+        let _ = stdout.clear();
+        let _ = stdout.enable_cursor(true);
+    });
+}
