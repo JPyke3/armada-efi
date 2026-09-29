@@ -160,7 +160,7 @@ fn draw_graphics(labels: &[&str], selected: usize, countdown: Option<u8>) -> Opt
     let bar = Size::new((size.width * 2 / 3).min(760), row_height as u32);
     let rows = ((size.height as i32 - y - 170) / (row_height + 12)).max(1) as usize;
     let first = selected
-        .saturating_sub(rows - 1)
+        .saturating_sub(rows / 2)
         .min(labels.len().saturating_sub(rows));
     for (index, label) in labels.iter().enumerate().skip(first).take(rows) {
         let color = if index == selected { WHITE } else { MUTED };
@@ -302,10 +302,36 @@ pub fn menu(timed: bool) -> Choice {
 }
 
 pub fn device_menu(models: &[&str]) -> Option<usize> {
-    let mut labels = models.to_vec();
-    labels.push("Back");
-    let selected = choose(&labels, false);
-    (selected < models.len()).then_some(selected)
+    let mut manufacturers = Vec::new();
+    for (index, model) in models.iter().enumerate() {
+        let manufacturer = model.split_once(' ').map_or(*model, |(name, _)| name);
+        if manufacturers.last().map(|(name, _)| *name) != Some(manufacturer) {
+            manufacturers.push((manufacturer, index));
+        }
+    }
+
+    loop {
+        let mut labels: Vec<_> = manufacturers.iter().map(|(name, _)| *name).collect();
+        labels.push("Back");
+        let manufacturer = choose(&labels, false);
+        if manufacturer == manufacturers.len() {
+            return None;
+        }
+
+        let start = manufacturers[manufacturer].1;
+        let end = manufacturers
+            .get(manufacturer + 1)
+            .map_or(models.len(), |(_, index)| *index);
+        let mut labels: Vec<_> = models[start..end]
+            .iter()
+            .map(|model| model.split_once(' ').map_or(*model, |(_, name)| name))
+            .collect();
+        labels.push("Back");
+        let selected = choose(&labels, false);
+        if selected < end - start {
+            return Some(start + selected);
+        }
+    }
 }
 
 pub fn clear() {
