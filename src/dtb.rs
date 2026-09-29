@@ -23,6 +23,8 @@ struct DtFixup {
 
 pub struct DeviceTree {
     pub model: String,
+    pub name: String,
+    compatible: String,
     path: CString16,
 }
 
@@ -64,17 +66,41 @@ pub fn available() -> Result<Vec<DeviceTree>> {
         }
         let path = CString16::try_from(format!(r"\dtbloader\dtbs\qcom\{name}").as_str())
             .map_err(|_| Status::INVALID_PARAMETER)?;
-        let data = read_from(&mut root, &path)?;
-        if let Ok(tree) = Fdt::new(&data) {
-            trees.push(DeviceTree {
-                model: tree.root().model().to_string(),
-                path,
-            });
+        if let Ok(tree) = load(&mut root, path, name.trim_end_matches(".dtb").to_string()) {
+            trees.push(tree);
         }
     }
 
     trees.sort_by(|left, right| left.model.cmp(&right.model));
     Ok(trees)
+}
+
+fn load(root: &mut Directory, path: CString16, name: String) -> Result<DeviceTree> {
+    let data = read_from(root, &path)?;
+    let tree = Fdt::new(&data).map_err(|_| Status::LOAD_ERROR)?;
+    Ok(DeviceTree {
+        model: tree.root().model().to_string(),
+        compatible: tree.root().compatible().first().to_string(),
+        name,
+        path,
+    })
+}
+
+pub fn from(directory: &str, name: &str) -> Result<DeviceTree> {
+    let path = format!(r"{}\{name}.dtb", directory.replace('/', r"\"));
+    let path = CString16::try_from(path.as_str()).map_err(|_| Status::INVALID_PARAMETER)?;
+    let mut file_system = boot::get_image_file_system(image_handle())?;
+    let mut root = file_system.open_volume()?;
+    load(&mut root, path, name.to_string())
+}
+
+pub fn detected(trees: &[DeviceTree]) -> Option<usize> {
+    let compatible = uefi::system::with_config_table(|tables| {
+        let table = tables.iter().find(|table| table.guid == DEVICE_TREE)?;
+        let tree = unsafe { Fdt::from_ptr(table.address.cast()) }.ok()?;
+        Some(tree.root().compatible().first().to_string())
+    })?;
+    trees.iter().position(|tree| tree.compatible == compatible)
 }
 
 pub fn install(tree: &DeviceTree) -> Result {

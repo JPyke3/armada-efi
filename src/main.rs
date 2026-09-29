@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod config;
 mod dtb;
 mod ui;
 
@@ -13,12 +14,14 @@ use uefi::prelude::*;
 use uefi::proto::BootPolicy;
 use uefi::proto::device_path::{DevicePath, build};
 use uefi::proto::loaded_image::LoadedImage;
-use uefi::{CStr16, Result, Status, cstr16};
+use uefi::runtime::{self, VariableAttributes, VariableVendor};
+use uefi::{CStr16, CString16, Result, Status, cstr16, guid};
 
 use ui::Choice;
 
 const DTB_LOADER: &CStr16 = cstr16!(r"\EFI\BOOT\drivers_aa64\adtbloaderaa64.efi");
 const SYSTEMD_BOOT: &CStr16 = cstr16!(r"\EFI\systemd\systemd-bootaa64.efi");
+const SYSTEMD: VariableVendor = VariableVendor(guid!("4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
 
 fn load(path: &CStr16) -> Result<Handle> {
     let image = boot::open_protocol_exclusive::<LoadedImage>(image_handle())?;
@@ -45,21 +48,52 @@ fn load(path: &CStr16) -> Result<Handle> {
     )
 }
 
+fn select(entry: &str) -> Result {
+    let entry = CString16::try_from(entry).map_err(|_| Status::INVALID_PARAMETER)?;
+    runtime::set_variable(
+        cstr16!("LoaderEntryOneShot"),
+        &SYSTEMD,
+        VariableAttributes::NON_VOLATILE
+            | VariableAttributes::BOOTSERVICE_ACCESS
+            | VariableAttributes::RUNTIME_ACCESS,
+        entry.as_bytes(),
+    )
+}
+
 fn run() -> Result {
     if let Ok(driver) = load(DTB_LOADER) {
         let _ = boot::start_image(driver);
     }
 
+    let config = config::load().unwrap_or_default();
+    let trees = dtb::available().unwrap_or_default();
+    let mut device = dtb::detected(&trees);
     let mut timed = true;
     loop {
-        match ui::menu(timed) {
+        let rollback = config.rollback.as_ref().and_then(|rollback| {
+            let tree = dtb::from(&rollback.dtbs, &trees.get(device?)?.name).ok()?;
+            Some((rollback, tree))
+        });
+        match ui::menu(
+            config.version.as_deref(),
+            rollback
+                .as_ref()
+                .map(|(rollback, _)| rollback.version.as_str()),
+            device.map(|index| trees[index].model.as_str()),
+            timed,
+        ) {
             Choice::Armada => break,
-            Choice::Advanced => {
-                let trees = dtb::available()?;
+            Choice::Previous => {
+                let (rollback, tree) = rollback.ok_or(Status::NOT_FOUND)?;
+                dtb::install(&tree)?;
+                select(&rollback.entry)?;
+                break;
+            }
+            Choice::Device => {
                 let models: Vec<_> = trees.iter().map(|tree| tree.model.as_str()).collect();
                 if let Some(selected) = ui::device_menu(&models) {
                     dtb::install(&trees[selected])?;
-                    break;
+                    device = Some(selected);
                 }
                 timed = false;
             }

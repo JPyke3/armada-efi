@@ -29,7 +29,23 @@ const SELECTED: Rgb888 = Rgb888::new(0x28, 0x28, 0x2d);
 #[derive(Clone, Copy)]
 pub enum Choice {
     Armada,
-    Advanced,
+    Previous,
+    Device,
+}
+
+#[derive(Clone, Copy)]
+struct Item<'a> {
+    label: &'a str,
+    detail: Option<&'a str>,
+}
+
+impl<'a> Item<'a> {
+    fn new(label: &'a str) -> Self {
+        Self {
+            label,
+            detail: None,
+        }
+    }
 }
 
 struct Canvas {
@@ -133,7 +149,7 @@ fn device_tree_rotation() -> Option<u8> {
     })
 }
 
-fn draw_graphics(labels: &[&str], selected: usize, countdown: Option<u8>) -> Option<()> {
+fn draw_graphics(items: &[Item], selected: usize, countdown: Option<u8>) -> Option<()> {
     let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
     let mut output = open::<GraphicsOutput>(handle).ok()?;
     let (width, height) = output.current_mode_info().resolution();
@@ -155,14 +171,18 @@ fn draw_graphics(labels: &[&str], selected: usize, countdown: Option<u8>) -> Opt
     let item = FontRenderer::new::<fonts::u8g2_font_fub30_tr>();
     let hint = FontRenderer::new::<fonts::u8g2_font_fur17_tr>();
 
-    let row_height = 76;
+    let row_height = if items.iter().any(|item| item.detail.is_some()) {
+        92
+    } else {
+        76
+    };
     let mut y = logo_y + logo.size().height as i32 + 70;
     let bar = Size::new((size.width * 2 / 3).min(760), row_height as u32);
     let rows = ((size.height as i32 - y - 170) / (row_height + 12)).max(1) as usize;
     let first = selected
         .saturating_sub(rows / 2)
-        .min(labels.len().saturating_sub(rows));
-    for (index, label) in labels.iter().enumerate().skip(first).take(rows) {
+        .min(items.len().saturating_sub(rows));
+    for (index, entry) in items.iter().enumerate().skip(first).take(rows) {
         let color = if index == selected { WHITE } else { MUTED };
         if index == selected {
             let area = Rectangle::new(Point::new(center - bar.width as i32 / 2, y), bar);
@@ -172,14 +192,32 @@ fn draw_graphics(labels: &[&str], selected: usize, countdown: Option<u8>) -> Opt
                 .ok()?;
         }
         item.render_aligned(
-            *label,
-            Point::new(center, y + row_height / 2),
+            entry.label,
+            Point::new(
+                center,
+                y + if entry.detail.is_some() {
+                    30
+                } else {
+                    row_height / 2
+                },
+            ),
             VerticalPosition::Center,
             HorizontalAlignment::Center,
             FontColor::Transparent(color),
             &mut canvas,
         )
         .ok()?;
+        if let Some(detail) = entry.detail {
+            hint.render_aligned(
+                detail,
+                Point::new(center, y + 67),
+                VerticalPosition::Center,
+                HorizontalAlignment::Center,
+                FontColor::Transparent(MUTED),
+                &mut canvas,
+            )
+            .ok()?;
+        }
         y += row_height + 12;
     }
 
@@ -213,16 +251,20 @@ fn draw_graphics(labels: &[&str], selected: usize, countdown: Option<u8>) -> Opt
     canvas.show(&mut output).ok()
 }
 
-fn draw_text(labels: &[&str], selected: usize, countdown: Option<u8>) {
+fn draw_text(items: &[Item], selected: usize, countdown: Option<u8>) {
     system::with_stdout(|stdout| {
         let _ = stdout.clear();
         let _ = stdout.enable_cursor(false);
-        for (index, label) in labels.iter().enumerate() {
+        for (index, item) in items.iter().enumerate() {
             let _ = writeln!(
                 stdout,
-                "{} {label}\r",
-                if selected == index { ">" } else { " " }
+                "{} {}\r",
+                if selected == index { ">" } else { " " },
+                item.label,
             );
+            if let Some(detail) = item.detail {
+                let _ = writeln!(stdout, "  {detail}\r",);
+            }
         }
         if let Some(countdown) = countdown {
             let _ = writeln!(stdout, "\r\nBooting in {countdown}\r");
@@ -231,9 +273,9 @@ fn draw_text(labels: &[&str], selected: usize, countdown: Option<u8>) {
     });
 }
 
-fn draw(labels: &[&str], selected: usize, countdown: Option<u8>) {
-    if draw_graphics(labels, selected, countdown).is_none() {
-        draw_text(labels, selected, countdown);
+fn draw(items: &[Item], selected: usize, countdown: Option<u8>) {
+    if draw_graphics(items, selected, countdown).is_none() {
+        draw_text(items, selected, countdown);
     }
 }
 
@@ -249,12 +291,12 @@ fn wait_for_release() {
     }
 }
 
-fn choose(labels: &[&str], timed: bool) -> usize {
+fn choose(items: &[Item], timed: bool) -> usize {
     let mut selected = 0;
     system::with_stdin(|stdin| {
         let _ = stdin.reset(false);
     });
-    draw(labels, selected, timed.then_some(3));
+    draw(items, selected, timed.then_some(3));
 
     let mut timeout = timed.then_some(60u8);
     loop {
@@ -262,14 +304,14 @@ fn choose(labels: &[&str], timed: bool) -> usize {
         match key {
             Some(Key::Special(ScanCode::UP)) => {
                 timeout = None;
-                selected = selected.checked_sub(1).unwrap_or(labels.len() - 1);
-                draw(labels, selected, None);
+                selected = selected.checked_sub(1).unwrap_or(items.len() - 1);
+                draw(items, selected, None);
                 boot::stall(Duration::from_millis(250));
             }
             Some(Key::Special(ScanCode::DOWN)) => {
                 timeout = None;
-                selected = (selected + 1) % labels.len();
-                draw(labels, selected, None);
+                selected = (selected + 1) % items.len();
+                draw(items, selected, None);
                 boot::stall(Duration::from_millis(250));
             }
             Some(Key::Special(ScanCode::SUSPEND)) => break,
@@ -281,7 +323,7 @@ fn choose(labels: &[&str], timed: bool) -> usize {
                         break;
                     }
                     if *polls % 20 == 0 {
-                        draw(labels, selected, Some(*polls / 20));
+                        draw(items, selected, Some(*polls / 20));
                     }
                 }
                 boot::stall(Duration::from_millis(50));
@@ -293,11 +335,30 @@ fn choose(labels: &[&str], timed: bool) -> usize {
     selected
 }
 
-pub fn menu(timed: bool) -> Choice {
-    if choose(&["ArmadaOS", "Device Override"], timed) == 0 {
-        Choice::Armada
-    } else {
-        Choice::Advanced
+pub fn menu(
+    version: Option<&str>,
+    rollback: Option<&str>,
+    device: Option<&str>,
+    timed: bool,
+) -> Choice {
+    let mut items = vec![Item {
+        label: "ArmadaOS",
+        detail: version,
+    }];
+    if let Some(version) = rollback {
+        items.push(Item {
+            label: "Previous Version",
+            detail: Some(version),
+        });
+    }
+    items.push(Item {
+        label: "Device Override",
+        detail: device,
+    });
+    match choose(&items, timed) {
+        0 => Choice::Armada,
+        1 if rollback.is_some() => Choice::Previous,
+        _ => Choice::Device,
     }
 }
 
@@ -311,9 +372,12 @@ pub fn device_menu(models: &[&str]) -> Option<usize> {
     }
 
     loop {
-        let mut labels: Vec<_> = manufacturers.iter().map(|(name, _)| *name).collect();
-        labels.push("Back");
-        let manufacturer = choose(&labels, false);
+        let mut items: Vec<_> = manufacturers
+            .iter()
+            .map(|(name, _)| Item::new(name))
+            .collect();
+        items.push(Item::new("Back"));
+        let manufacturer = choose(&items, false);
         if manufacturer == manufacturers.len() {
             return None;
         }
@@ -322,12 +386,12 @@ pub fn device_menu(models: &[&str]) -> Option<usize> {
         let end = manufacturers
             .get(manufacturer + 1)
             .map_or(models.len(), |(_, index)| *index);
-        let mut labels: Vec<_> = models[start..end]
+        let mut items: Vec<_> = models[start..end]
             .iter()
-            .map(|model| model.split_once(' ').map_or(*model, |(_, name)| name))
+            .map(|model| Item::new(model.split_once(' ').map_or(*model, |(_, name)| name)))
             .collect();
-        labels.push("Back");
-        let selected = choose(&labels, false);
+        items.push(Item::new("Back"));
+        let selected = choose(&items, false);
         if selected < end - start {
             return Some(start + selected);
         }

@@ -36,6 +36,7 @@
 - **Graphical Boot Interface**: Rendered via UEFI Graphics Output Protocol (GOP) with Armada branding, display rotation detection, and text console fallback.
 - **Handheld Controls**: Navigate the boot menu using device volume buttons (`VOL+`/`VOL-`) and `POWER`, or standard keyboard arrows and `Enter`.
 - **Timed Boot**: Displays a 3-second countdown for unattended startup, automatically pausing countdown if user input is received.
+- **Bootc Rollback**: Offers the previous deployment when available and selects it for one boot through `systemd-boot`.
 - **Device Tree Selection**: Browse and select supported Qualcomm Device Trees (`.dtb`) grouped by manufacturer, applying `DtFixup` protocol fixups dynamically.
 - **Clean Chainloading**: Loads the `adtbloader` driver to initialize device trees, then chainloads `systemd-boot`.
 
