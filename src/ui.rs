@@ -133,7 +133,7 @@ fn device_tree_rotation() -> Option<u8> {
     })
 }
 
-fn draw_graphics(selected: usize) -> Option<()> {
+fn draw_graphics(selected: usize, countdown: Option<u8>) -> Option<()> {
     let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
     let mut output = open::<GraphicsOutput>(handle).ok()?;
     let (width, height) = output.current_mode_info().resolution();
@@ -152,24 +152,12 @@ fn draw_graphics(selected: usize) -> Option<()> {
         .draw(&mut canvas)
         .ok()?;
 
-    let title = FontRenderer::new::<fonts::u8g2_font_fub42_tr>();
     let item = FontRenderer::new::<fonts::u8g2_font_fub30_tr>();
     let hint = FontRenderer::new::<fonts::u8g2_font_fur17_tr>();
-    let title_y = logo_y + logo.size().height as i32 + 56;
-    title
-        .render_aligned(
-            "ARMADA",
-            Point::new(center, title_y),
-            VerticalPosition::Center,
-            HorizontalAlignment::Center,
-            FontColor::Transparent(WHITE),
-            &mut canvas,
-        )
-        .ok()?;
 
     let labels = ["ArmadaOS", "Advanced"];
     let row_height = 76;
-    let mut y = title_y + 100;
+    let mut y = logo_y + logo.size().height as i32 + 70;
     let bar = Size::new((size.width * 2 / 3).min(760), row_height as u32);
     for (index, label) in labels.iter().enumerate() {
         let color = if index == selected { WHITE } else { MUTED };
@@ -192,6 +180,24 @@ fn draw_graphics(selected: usize) -> Option<()> {
         y += row_height + 12;
     }
 
+    let countdown = match countdown {
+        Some(3) => Some("Booting in 3"),
+        Some(2) => Some("Booting in 2"),
+        Some(1) => Some("Booting in 1"),
+        _ => None,
+    };
+    if let Some(countdown) = countdown {
+        hint.render_aligned(
+            countdown,
+            Point::new(center, y + 28),
+            VerticalPosition::Center,
+            HorizontalAlignment::Center,
+            FontColor::Transparent(MUTED),
+            &mut canvas,
+        )
+        .ok()?;
+    }
+
     hint.render_aligned(
         "VOL+/VOL- or arrows - POWER or Enter to select",
         Point::new(center, size.height as i32 - 70),
@@ -204,11 +210,10 @@ fn draw_graphics(selected: usize) -> Option<()> {
     canvas.show(&mut output).ok()
 }
 
-fn draw_text(selected: usize) {
+fn draw_text(selected: usize, countdown: Option<u8>) {
     system::with_stdout(|stdout| {
         let _ = stdout.clear();
         let _ = stdout.enable_cursor(false);
-        let _ = writeln!(stdout, "ARMADA\r\n");
         let _ = writeln!(
             stdout,
             "{} ArmadaOS\r",
@@ -219,13 +224,16 @@ fn draw_text(selected: usize) {
             "{} Advanced\r",
             if selected == 1 { ">" } else { " " }
         );
+        if let Some(countdown) = countdown {
+            let _ = writeln!(stdout, "\r\nBooting in {countdown}\r");
+        }
         let _ = writeln!(stdout, "\r\nUse arrows and Enter to select\r");
     });
 }
 
-fn draw(selected: usize) {
-    if draw_graphics(selected).is_none() {
-        draw_text(selected);
+fn draw(selected: usize, countdown: Option<u8>) {
+    if draw_graphics(selected, countdown).is_none() {
+        draw_text(selected, countdown);
     }
 }
 
@@ -246,19 +254,32 @@ pub fn menu() -> Choice {
     system::with_stdin(|stdin| {
         let _ = stdin.reset(false);
     });
-    draw(selected);
+    draw(selected, Some(3));
 
-    for _ in 0..60 {
+    let mut timeout = Some(60u8);
+    loop {
         let key = system::with_stdin(|stdin| stdin.read_key().ok().flatten());
         match key {
             Some(Key::Special(ScanCode::UP | ScanCode::DOWN)) => {
+                timeout = None;
                 selected ^= 1;
-                draw(selected);
+                draw(selected, None);
                 boot::stall(Duration::from_millis(250));
             }
             Some(Key::Special(ScanCode::SUSPEND)) => break,
             Some(Key::Printable(key)) if key == '\r' => break,
-            _ => boot::stall(Duration::from_millis(50)),
+            _ => {
+                if let Some(polls) = timeout.as_mut() {
+                    *polls -= 1;
+                    if *polls == 0 {
+                        break;
+                    }
+                    if *polls % 20 == 0 {
+                        draw(selected, Some(*polls / 20));
+                    }
+                }
+                boot::stall(Duration::from_millis(50));
+            }
         }
     }
 
