@@ -294,7 +294,7 @@ fn choose(labels: &[&str], timed: bool) -> usize {
 }
 
 pub fn menu(timed: bool) -> Choice {
-    if choose(&["ArmadaOS", "Advanced"], timed) == 0 {
+    if choose(&["ArmadaOS", "Device Override"], timed) == 0 {
         Choice::Armada
     } else {
         Choice::Advanced
