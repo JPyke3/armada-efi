@@ -3,6 +3,7 @@
 
 extern crate alloc;
 
+mod dtb;
 mod ui;
 
 use alloc::vec::Vec;
@@ -12,15 +13,12 @@ use uefi::prelude::*;
 use uefi::proto::BootPolicy;
 use uefi::proto::device_path::{DevicePath, build};
 use uefi::proto::loaded_image::LoadedImage;
-use uefi::runtime::{self, VariableAttributes, VariableVendor};
-use uefi::{CStr16, Result, Status, cstr16, guid};
+use uefi::{CStr16, Result, Status, cstr16};
 
 use ui::Choice;
 
 const DTB_LOADER: &CStr16 = cstr16!(r"\EFI\BOOT\drivers_aa64\adtbloaderaa64.efi");
 const SYSTEMD_BOOT: &CStr16 = cstr16!(r"\EFI\systemd\systemd-bootaa64.efi");
-const LOADER_VENDOR: VariableVendor = VariableVendor(guid!("4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"));
-const TIMEOUT_ONESHOT: &CStr16 = cstr16!("LoaderConfigTimeoutOneShot");
 
 fn load(path: &CStr16) -> Result<Handle> {
     let image = boot::open_protocol_exclusive::<LoadedImage>(image_handle())?;
@@ -52,11 +50,20 @@ fn run() -> Result {
         let _ = boot::start_image(driver);
     }
 
-    if matches!(ui::menu(), Choice::Advanced) {
-        let attributes = VariableAttributes::NON_VOLATILE
-            | VariableAttributes::BOOTSERVICE_ACCESS
-            | VariableAttributes::RUNTIME_ACCESS;
-        runtime::set_variable(TIMEOUT_ONESHOT, &LOADER_VENDOR, attributes, b"0\0\0\0")?;
+    let mut timed = true;
+    loop {
+        match ui::menu(timed) {
+            Choice::Armada => break,
+            Choice::Advanced => {
+                let trees = dtb::available()?;
+                let models: Vec<_> = trees.iter().map(|tree| tree.model.as_str()).collect();
+                if let Some(selected) = ui::device_menu(&models) {
+                    dtb::install(&trees[selected])?;
+                    break;
+                }
+                timed = false;
+            }
+        }
     }
 
     ui::clear();

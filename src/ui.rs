@@ -133,7 +133,7 @@ fn device_tree_rotation() -> Option<u8> {
     })
 }
 
-fn draw_graphics(selected: usize, countdown: Option<u8>) -> Option<()> {
+fn draw_graphics(labels: &[&str], selected: usize, countdown: Option<u8>) -> Option<()> {
     let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
     let mut output = open::<GraphicsOutput>(handle).ok()?;
     let (width, height) = output.current_mode_info().resolution();
@@ -155,11 +155,14 @@ fn draw_graphics(selected: usize, countdown: Option<u8>) -> Option<()> {
     let item = FontRenderer::new::<fonts::u8g2_font_fub30_tr>();
     let hint = FontRenderer::new::<fonts::u8g2_font_fur17_tr>();
 
-    let labels = ["ArmadaOS", "Advanced"];
     let row_height = 76;
     let mut y = logo_y + logo.size().height as i32 + 70;
     let bar = Size::new((size.width * 2 / 3).min(760), row_height as u32);
-    for (index, label) in labels.iter().enumerate() {
+    let rows = ((size.height as i32 - y - 170) / (row_height + 12)).max(1) as usize;
+    let first = selected
+        .saturating_sub(rows - 1)
+        .min(labels.len().saturating_sub(rows));
+    for (index, label) in labels.iter().enumerate().skip(first).take(rows) {
         let color = if index == selected { WHITE } else { MUTED };
         if index == selected {
             let area = Rectangle::new(Point::new(center - bar.width as i32 / 2, y), bar);
@@ -189,7 +192,7 @@ fn draw_graphics(selected: usize, countdown: Option<u8>) -> Option<()> {
     if let Some(countdown) = countdown {
         hint.render_aligned(
             countdown,
-            Point::new(center, y + 28),
+            Point::new(center, size.height as i32 - 125),
             VerticalPosition::Center,
             HorizontalAlignment::Center,
             FontColor::Transparent(MUTED),
@@ -210,20 +213,17 @@ fn draw_graphics(selected: usize, countdown: Option<u8>) -> Option<()> {
     canvas.show(&mut output).ok()
 }
 
-fn draw_text(selected: usize, countdown: Option<u8>) {
+fn draw_text(labels: &[&str], selected: usize, countdown: Option<u8>) {
     system::with_stdout(|stdout| {
         let _ = stdout.clear();
         let _ = stdout.enable_cursor(false);
-        let _ = writeln!(
-            stdout,
-            "{} ArmadaOS\r",
-            if selected == 0 { ">" } else { " " }
-        );
-        let _ = writeln!(
-            stdout,
-            "{} Advanced\r",
-            if selected == 1 { ">" } else { " " }
-        );
+        for (index, label) in labels.iter().enumerate() {
+            let _ = writeln!(
+                stdout,
+                "{} {label}\r",
+                if selected == index { ">" } else { " " }
+            );
+        }
         if let Some(countdown) = countdown {
             let _ = writeln!(stdout, "\r\nBooting in {countdown}\r");
         }
@@ -231,9 +231,9 @@ fn draw_text(selected: usize, countdown: Option<u8>) {
     });
 }
 
-fn draw(selected: usize, countdown: Option<u8>) {
-    if draw_graphics(selected, countdown).is_none() {
-        draw_text(selected, countdown);
+fn draw(labels: &[&str], selected: usize, countdown: Option<u8>) {
+    if draw_graphics(labels, selected, countdown).is_none() {
+        draw_text(labels, selected, countdown);
     }
 }
 
@@ -249,21 +249,27 @@ fn wait_for_release() {
     }
 }
 
-pub fn menu() -> Choice {
+fn choose(labels: &[&str], timed: bool) -> usize {
     let mut selected = 0;
     system::with_stdin(|stdin| {
         let _ = stdin.reset(false);
     });
-    draw(selected, Some(3));
+    draw(labels, selected, timed.then_some(3));
 
-    let mut timeout = Some(60u8);
+    let mut timeout = timed.then_some(60u8);
     loop {
         let key = system::with_stdin(|stdin| stdin.read_key().ok().flatten());
         match key {
-            Some(Key::Special(ScanCode::UP | ScanCode::DOWN)) => {
+            Some(Key::Special(ScanCode::UP)) => {
                 timeout = None;
-                selected ^= 1;
-                draw(selected, None);
+                selected = selected.checked_sub(1).unwrap_or(labels.len() - 1);
+                draw(labels, selected, None);
+                boot::stall(Duration::from_millis(250));
+            }
+            Some(Key::Special(ScanCode::DOWN)) => {
+                timeout = None;
+                selected = (selected + 1) % labels.len();
+                draw(labels, selected, None);
                 boot::stall(Duration::from_millis(250));
             }
             Some(Key::Special(ScanCode::SUSPEND)) => break,
@@ -275,7 +281,7 @@ pub fn menu() -> Choice {
                         break;
                     }
                     if *polls % 20 == 0 {
-                        draw(selected, Some(*polls / 20));
+                        draw(labels, selected, Some(*polls / 20));
                     }
                 }
                 boot::stall(Duration::from_millis(50));
@@ -284,11 +290,22 @@ pub fn menu() -> Choice {
     }
 
     wait_for_release();
-    if selected == 0 {
+    selected
+}
+
+pub fn menu(timed: bool) -> Choice {
+    if choose(&["ArmadaOS", "Advanced"], timed) == 0 {
         Choice::Armada
     } else {
         Choice::Advanced
     }
+}
+
+pub fn device_menu(models: &[&str]) -> Option<usize> {
+    let mut labels = models.to_vec();
+    labels.push("Back");
+    let selected = choose(&labels, false);
+    (selected < models.len()).then_some(selected)
 }
 
 pub fn clear() {
