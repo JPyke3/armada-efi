@@ -1,0 +1,38 @@
+---
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install target
+        run: rustup target add aarch64-unknown-uefi
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --target aarch64-unknown-uefi -- -D warnings
+
+      - name: Build
+        run: cargo build --locked --release --target aarch64-unknown-uefi
+
+      - name: Upload EFI application
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: armada-boot
+          path: target/aarch64-unknown-uefi/release/armada-boot.efi
+          if-no-files-found: error
